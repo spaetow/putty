@@ -13,7 +13,8 @@ typedef enum Ssh_gss_stat {
     SSH_GSS_S_CONTINUE_NEEDED,
     SSH_GSS_NO_MEM,
     SSH_GSS_BAD_HOST_NAME,
-    SSH_GSS_FAILURE
+    SSH_GSS_FAILURE,
+    SSH_GSS_S_PROMPTING_NEEDED,
 } Ssh_gss_stat;
 
 #define SSH_GSS_S_COMPLETE SSH_GSS_OK
@@ -55,7 +56,7 @@ void ssh_gss_cleanup(struct ssh_gss_liblist *list);
  * use. buf->data is not dynamically allocated.
  */
 typedef Ssh_gss_stat (*t_ssh_gss_indicate_mech)(struct ssh_gss_library *lib,
-						Ssh_gss_buf *buf);
+						Ssh_gss_buf *buf, int mech_index);
 
 /*
  * Converts a name such as a hostname into a GSSAPI internal form,
@@ -79,7 +80,7 @@ typedef Ssh_gss_stat (*t_ssh_gss_release_name)(struct ssh_gss_library *lib,
 typedef Ssh_gss_stat (*t_ssh_gss_init_sec_context)
     (struct ssh_gss_library *lib,
      Ssh_gss_ctx *ctx, Ssh_gss_name name, int delegate,
-     Ssh_gss_buf *in, Ssh_gss_buf *out);
+     Ssh_gss_buf *in, Ssh_gss_buf *out, int mech_index);
 
 /*
  * Frees the contents of an Ssh_gss_buf filled in by
@@ -96,7 +97,9 @@ typedef Ssh_gss_stat (*t_ssh_gss_free_tok)(struct ssh_gss_library *lib,
  * place. Needs to be freed by ssh_gss_release_cred().
  */
 typedef Ssh_gss_stat (*t_ssh_gss_acquire_cred)(struct ssh_gss_library *lib,
-					       Ssh_gss_ctx *);
+					       Ssh_gss_name target,
+					       unsigned int prompt,
+					       Ssh_gss_ctx *, int mech_index);
 
 /*
  * Frees the contents of an Ssh_gss_ctx filled in by
@@ -131,7 +134,7 @@ typedef Ssh_gss_stat (*t_ssh_gss_free_mic)(struct ssh_gss_library *lib,
  * buf->data should be manually freed by the caller. 
  */
 typedef Ssh_gss_stat (*t_ssh_gss_display_status)(struct ssh_gss_library *lib,
-						 Ssh_gss_ctx, Ssh_gss_buf *buf);
+						 Ssh_gss_ctx, Ssh_gss_buf *buf, int mech_index);
 
 struct ssh_gss_library {
     /*

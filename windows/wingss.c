@@ -3,7 +3,9 @@
 #include "putty.h"
 
 #define SECURITY_WIN32
+#include <assert.h>
 #include <security.h>
+#include <wincred.h>
 
 #include "pgssapi.h"
 #include "sshgss.h"
@@ -49,6 +51,18 @@ DECL_WINDOWS_FUNCTION(static, SECURITY_STATUS,
 DECL_WINDOWS_FUNCTION(static, SECURITY_STATUS,
 		      MakeSignature,
 		      (PCtxtHandle, ULONG, PSecBufferDesc, ULONG));
+DECL_WINDOWS_FUNCTION(static, SECURITY_STATUS,
+		      SspiFreeAuthIdentity,
+		      (PSEC_WINNT_AUTH_IDENTITY_OPAQUE));
+DECL_WINDOWS_FUNCTION(static, BOOLEAN,
+		      SspiIsPromptingNeeded,
+		      (unsigned long));
+DECL_WINDOWS_FUNCTION(static, SECURITY_STATUS,
+		      SspiPromptForCredentialsA,
+		      (PCSTR, PCREDUI_INFOA, DWORD, PCSTR,
+		      PSEC_WINNT_AUTH_IDENTITY_OPAQUE,
+		      PSEC_WINNT_AUTH_IDENTITY_OPAQUE *,
+		      PBOOL, DWORD));
 
 typedef struct winSsh_gss_ctx {
     unsigned long maj_stat;
@@ -59,8 +73,6 @@ typedef struct winSsh_gss_ctx {
     TimeStamp expiry;
 } winSsh_gss_ctx;
 
-
-const Ssh_gss_buf gss_mech_krb5={9,"\x2A\x86\x48\x86\xF7\x12\x01\x02\x02"};
 
 const char *gsslogmsg = NULL;
 
@@ -130,6 +142,7 @@ struct ssh_gss_liblist *ssh_gss_setup(Conf *conf)
     if (module) {
 	struct ssh_gss_library *lib =
 	    &list->libraries[list->nlibraries++];
+	HMODULE credmodule;
 
 	lib->id = 1;
 	lib->gsslogmsg = "Using SSPI from SECUR32.DLL";
@@ -142,6 +155,12 @@ struct ssh_gss_liblist *ssh_gss_setup(Conf *conf)
 	GET_WINDOWS_FUNCTION(module, DeleteSecurityContext);
 	GET_WINDOWS_FUNCTION(module, QueryContextAttributesA);
 	GET_WINDOWS_FUNCTION(module, MakeSignature);
+	GET_WINDOWS_FUNCTION(module, SspiFreeAuthIdentity);
+
+	if ((credmodule = load_system32_dll("credui.dll")) != NULL) {
+	    GET_WINDOWS_FUNCTION(credmodule, SspiIsPromptingNeeded);
+	    GET_WINDOWS_FUNCTION(credmodule, SspiPromptForCredentialsA);
+	}
 
 	ssh_sspi_bind_fns(lib);
     }
@@ -210,9 +229,10 @@ void ssh_gss_cleanup(struct ssh_gss_liblist *list)
 }
 
 static Ssh_gss_stat ssh_sspi_indicate_mech(struct ssh_gss_library *lib,
-					   Ssh_gss_buf *mech)
+					   Ssh_gss_buf *mech, int mech_index)
 {
-    *mech = gss_mech_krb5;
+    mech->length = gss_mechs_array[mech_index]->length;
+    mech->value = gss_mechs_array[mech_index]->elements;
     return SSH_GSS_OK;
 }
 
@@ -234,27 +254,59 @@ static Ssh_gss_stat ssh_sspi_import_name(struct ssh_gss_library *lib,
 }
 
 static Ssh_gss_stat ssh_sspi_acquire_cred(struct ssh_gss_library *lib,
-					  Ssh_gss_ctx *ctx)
+					  Ssh_gss_name target,
+					  unsigned int gss_prompting,
+					  Ssh_gss_ctx *ctx, int mech_index)
 {
+    PSEC_WINNT_AUTH_IDENTITY_OPAQUE authid = NULL;
+    CREDUI_INFO uiinfo;
+    BOOL save = FALSE;
     winSsh_gss_ctx *winctx = snew(winSsh_gss_ctx);
     memset(winctx, 0, sizeof(winSsh_gss_ctx));
 
     /* prepare our "wrapper" structure */
-    winctx->maj_stat =  winctx->min_stat = SEC_E_OK;
+    winctx->maj_stat = winctx->min_stat = SEC_E_OK;
     winctx->context_handle = NULL;
 
-    /* Specifying no principal name here means use the credentials of
-       the current logged-in user */
+    if (gss_prompting != 0) {
+        char *szTarget = (char *)target;
 
+        if (p_SspiPromptForCredentialsA == NULL) return SSH_GSS_FAILURE;
+
+        assert(strncmp(szTarget, "host/", 5) == 0);
+
+        memset(&uiinfo, 0, sizeof(uiinfo));
+        uiinfo.cbSize = sizeof(uiinfo);
+        uiinfo.hwndParent = logbox;
+        uiinfo.pszMessageText = dupprintf("Connecting to %s.", &szTarget[5]);
+        uiinfo.pszCaptionText = "PuTTY";
+
+        winctx->maj_stat = p_SspiPromptForCredentialsA(szTarget,
+                           &uiinfo,
+                           winctx->maj_stat,
+                           "Negotiate",		/* Ask the Negotiate package to prompt for the credential */
+                           NULL,
+                           &authid,
+                           &save,
+                           0);
+
+        if (winctx->maj_stat != SEC_E_OK) return SSH_GSS_FAILURE;
+    }
+
+    /* Specifying no principal name here means use the credentials of
+     * the current logged-in user
+     */
     winctx->maj_stat = p_AcquireCredentialsHandleA(NULL,
-						   "Kerberos",
+						   (SEC_CHAR *) gss_mech_names[mech_index],
 						   SECPKG_CRED_OUTBOUND,
 						   NULL,
-						   NULL,
+						   authid,
 						   NULL,
 						   NULL,
 						   &winctx->cred_handle,
 						   &winctx->expiry);
+
+    if (p_SspiFreeAuthIdentity != NULL && authid != NULL) p_SspiFreeAuthIdentity(authid);
 
     if (winctx->maj_stat != SEC_E_OK) return SSH_GSS_FAILURE;
     
@@ -268,7 +320,8 @@ static Ssh_gss_stat ssh_sspi_init_sec_context(struct ssh_gss_library *lib,
 					      Ssh_gss_name srv_name,
 					      int to_deleg,
 					      Ssh_gss_buf *recv_tok,
-					      Ssh_gss_buf *send_tok)
+					      Ssh_gss_buf *send_tok,
+					      int mech_index)
 {
     winSsh_gss_ctx *winctx = (winSsh_gss_ctx *) *ctx;
     SecBuffer wsend_tok = {send_tok->length,SECBUFFER_TOKEN,send_tok->value};
@@ -301,8 +354,8 @@ static Ssh_gss_stat ssh_sspi_init_sec_context(struct ssh_gss_library *lib,
   
     /* check & return our status */
     if (winctx->maj_stat==SEC_E_OK) return SSH_GSS_S_COMPLETE;
-    if (winctx->maj_stat==SEC_I_CONTINUE_NEEDED) return SSH_GSS_S_CONTINUE_NEEDED;
-    
+    else if (winctx->maj_stat==SEC_I_CONTINUE_NEEDED) return SSH_GSS_S_CONTINUE_NEEDED;
+    else if (p_SspiIsPromptingNeeded && p_SspiIsPromptingNeeded(winctx->maj_stat)) return SSH_GSS_S_PROMPTING_NEEDED;
     return SSH_GSS_FAILURE;
 }
 
@@ -352,7 +405,7 @@ static Ssh_gss_stat ssh_sspi_release_name(struct ssh_gss_library *lib,
 }
 
 static Ssh_gss_stat ssh_sspi_display_status(struct ssh_gss_library *lib,
-					    Ssh_gss_ctx ctx, Ssh_gss_buf *buf)
+					    Ssh_gss_ctx ctx, Ssh_gss_buf *buf, int mech_index)
 {
     winSsh_gss_ctx *winctx = (winSsh_gss_ctx *) ctx;
     const char *msg;
