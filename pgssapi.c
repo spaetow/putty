@@ -102,4 +102,34 @@ static gss_OID_desc gss_mech_krb5_desc =
 /* iso(1) member-body(2) United States(840) mit(113554) infosys(1) gssapi(2) krb5(2)*/
 const gss_OID GSS_MECH_KRB5 = &gss_mech_krb5_desc;
 
+static gss_OID_desc gss_mech_eap_aes128_desc =
+{ 9, (void *)"\x2B\x06\x01\x05\x05\x0f\x01\x01\x11" };
+/* iso(1) identified-organization(3) dod(6) internet(1) security(5) mechanisms(5) abfab(15) mechanisms(1) gss-eap-v1(1) aes128-cts-hmac-sha1-9 (17)*/
+const gss_OID GSS_MECH_EAP_AES_128 = &gss_mech_eap_aes128_desc;
+
+static gss_OID_desc gss_mech_eap_aes256_desc =
+{ 9, (void *)"\x2B\x06\x01\x05\x05\x0f\x01\x01\x12" };
+/* iso(1) identified-organization(3) dod(6) internet(1) security(5) mechanisms(5) abfab(15) mechanisms(1) gss-eap-v1(1) aes256-cts-hmac-sha1-9 (18)*/
+const gss_OID GSS_MECH_EAP_AES_256 = &gss_mech_eap_aes256_desc;
+
+/* Array of supported mechanisms on Windows - The Windows API does not give us as
+ * neat little gss_OID_set to work with, so we have to bodge this for the time being.
+ */
+const const_gss_OID gss_mechs_array[] = {
+	&gss_mech_krb5_desc, 
+	&gss_mech_eap_aes128_desc, 
+	&gss_mech_eap_aes256_desc,
+};
+const int gss_mechs_count = 3;
+
+/* Array of mechanism names (primarily for Windows) - If you update gss_mechs_array 
+ * with new mechanisms, you have to update this array with the mechanism's name too!
+ */
+const char *const gss_mech_names[] = {
+    "Kerberos",
+    "eap-aes128",
+    "eap-aes256",
+};
+
+
 #endif /* NO_GSSAPI */

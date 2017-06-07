@@ -9228,6 +9228,9 @@ static void do_ssh2_authconn(Ssh ssh, const unsigned char *in, int inlen,
 #ifndef NO_GSSAPI
 	int can_gssapi;
 	int tried_gssapi;
+#define SSH_GSS_NOT_TRIED    0
+#define SSH_GSS_DEFAULT_CREDS   1
+#define SSH_GSS_PROMPT_CREDS    2
 #endif
 	int kbd_inter_refused;
 	int we_are_in, userauth_success;
@@ -9258,6 +9261,8 @@ static void do_ssh2_authconn(Ssh ssh, const unsigned char *in, int inlen,
 	Ssh_gss_buf gss_rcvtok, gss_sndtok;
 	Ssh_gss_name gss_srv_name;
 	Ssh_gss_stat gss_stat;
+	int gss_mech_index;
+	int gss_have_mech;
 #endif
     };
     crState(do_ssh2_authconn_state);
@@ -9290,7 +9295,7 @@ static void do_ssh2_authconn(Ssh ssh, const unsigned char *in, int inlen,
     s->we_are_in = s->userauth_success = FALSE;
     s->agent_response = NULL;
 #ifndef NO_GSSAPI
-    s->tried_gssapi = FALSE;
+    s->tried_gssapi = SSH_GSS_NOT_TRIED;
 #endif
 
     if (!ssh->bare_connection) {
@@ -10075,7 +10080,8 @@ static void do_ssh2_authconn(Ssh ssh, const unsigned char *in, int inlen,
 		}
 
 #ifndef NO_GSSAPI
-	    } else if (s->can_gssapi && !s->tried_gssapi) {
+	    } else if (s->can_gssapi &&
+		       s->tried_gssapi < SSH_GSS_PROMPT_CREDS) {
 
 		/* GSSAPI Authentication */
 
@@ -10083,9 +10089,11 @@ static void do_ssh2_authconn(Ssh ssh, const unsigned char *in, int inlen,
 		char *data;
 		Ssh_gss_buf mic;
 		s->type = AUTH_TYPE_GSSAPI;
-		s->tried_gssapi = TRUE;
+		s->tried_gssapi++;
 		s->gotit = TRUE;
 		ssh->pkt_actx = SSH2_PKTCTX_GSSAPI;
+		s->gss_have_mech = 0;
+		s->gss_mech_index = 0;
 
 		/*
 		 * Pick the highest GSS library on the preference
@@ -10117,15 +10125,16 @@ static void do_ssh2_authconn(Ssh ssh, const unsigned char *in, int inlen,
 		if (s->gsslib->gsslogmsg)
 		    logevent(s->gsslib->gsslogmsg);
 
+		do {
 		/* Sending USERAUTH_REQUEST with "gssapi-with-mic" method */
 		s->pktout = ssh2_pkt_init(SSH2_MSG_USERAUTH_REQUEST);
 		ssh2_pkt_addstring(s->pktout, ssh->username);
 		ssh2_pkt_addstring(s->pktout, "ssh-connection");
 		ssh2_pkt_addstring(s->pktout, "gssapi-with-mic");
-                logevent("Attempting GSSAPI authentication");
+		logevent("Attempting GSSAPI authentication");
 
 		/* add mechanism info */
-		s->gsslib->indicate_mech(s->gsslib, &s->gss_buf);
+		s->gsslib->indicate_mech(s->gsslib, &s->gss_buf, s->gss_mech_index);
 
 		/* number of GSSAPI mechanisms */
 		ssh2_pkt_adduint32(s->pktout,1);
@@ -10143,6 +10152,7 @@ static void do_ssh2_authconn(Ssh ssh, const unsigned char *in, int inlen,
 		crWaitUntilV(pktin);
 		if (pktin->type != SSH2_MSG_USERAUTH_GSSAPI_RESPONSE) {
 		    logevent("GSSAPI authentication request refused");
+		    s->gss_mech_index++;
 		    continue;
 		}
 
@@ -10157,10 +10167,12 @@ static void do_ssh2_authconn(Ssh ssh, const unsigned char *in, int inlen,
 		    memcmp((char *)s->gss_rcvtok.value + 2,
 			   s->gss_buf.value,s->gss_buf.length) ) {
 		    logevent("GSSAPI authentication - wrong response from server");
+		    s->gss_mech_index++;
 		    continue;
 		}
 
 		/* now start running */
+		logevent("GSSAPI authentication - Successfully negotiated mechanism");
 		s->gss_stat = s->gsslib->import_name(s->gsslib,
 						     ssh->fullhostname,
 						     &s->gss_srv_name);
@@ -10169,15 +10181,17 @@ static void do_ssh2_authconn(Ssh ssh, const unsigned char *in, int inlen,
 			logevent("GSSAPI import name failed - Bad service name");
 		    else
 			logevent("GSSAPI import name failed");
+			s->gss_mech_index++;
 		    continue;
 		}
 
 		/* fetch TGT into GSS engine */
-		s->gss_stat = s->gsslib->acquire_cred(s->gsslib, &s->gss_ctx);
+		s->gss_stat = s->gsslib->acquire_cred(s->gsslib, s->gss_srv_name, s->tried_gssapi == SSH_GSS_PROMPT_CREDS, &s->gss_ctx, s->gss_mech_index);
 
 		if (s->gss_stat != SSH_GSS_OK) {
 		    logevent("GSSAPI authentication failed to get credentials");
 		    s->gsslib->release_name(s->gsslib, &s->gss_srv_name);
+		    s->gss_mech_index++;
 		    continue;
 		}
 
@@ -10193,21 +10207,30 @@ static void do_ssh2_authconn(Ssh ssh, const unsigned char *in, int inlen,
 			 s->gss_srv_name,
 			 conf_get_int(ssh->conf, CONF_gssapifwd),
 			 &s->gss_rcvtok,
-			 &s->gss_sndtok);
+			 &s->gss_sndtok,
+			 s->gss_mech_index);
 
-		    if (s->gss_stat!=SSH_GSS_S_COMPLETE &&
-			s->gss_stat!=SSH_GSS_S_CONTINUE_NEEDED) {
+			if (s->tried_gssapi != SSH_GSS_PROMPT_CREDS &&
+			    s->gss_stat==SSH_GSS_S_PROMPTING_NEEDED) {
+			    /* Retry with new creds */
+			    logevent("GSSAPI authentication needs prompting");
+			    s->gsslib->release_name(s->gsslib, &s->gss_srv_name);
+			    s->gsslib->release_cred(s->gsslib, &s->gss_ctx);
+			    continue;
+			} else if (s->gss_stat!=SSH_GSS_S_COMPLETE &&
+			    s->gss_stat!=SSH_GSS_S_CONTINUE_NEEDED) {
 			logevent("GSSAPI authentication initialisation failed");
 
 			if (s->gsslib->display_status(s->gsslib, s->gss_ctx,
-						      &s->gss_buf) == SSH_GSS_OK) {
+						      &s->gss_buf, s->gss_mech_index) == SSH_GSS_OK) {
 			    logevent(s->gss_buf.value);
 			    sfree(s->gss_buf.value);
 			}
 
+			s->tried_gssapi = SSH_GSS_PROMPT_CREDS;
 			break;
 		    }
-		    logevent("GSSAPI authentication initialised");
+		    logevent("GSSAPI authentication started");
 
 		    /* Client and server now exchange tokens until GSSAPI
 		     * no longer says CONTINUE_NEEDED */
@@ -10236,8 +10259,18 @@ static void do_ssh2_authconn(Ssh ssh, const unsigned char *in, int inlen,
 		if (s->gss_stat != SSH_GSS_OK) {
 		    s->gsslib->release_name(s->gsslib, &s->gss_srv_name);
 		    s->gsslib->release_cred(s->gsslib, &s->gss_ctx);
-		    continue;
+		    s->gss_have_mech = 0;
 		}
+		else s->gss_have_mech = 1;
+
+		s->gss_mech_index++;
+
+		} while (s->gss_mech_index < gss_mechs_count && !s->gss_have_mech);
+
+		/* Quit here when we don't have a mechanism by now */
+		if (!s->gss_have_mech)
+		    continue;
+
 		logevent("GSSAPI authentication loop finished OK");
 
 		/* Now send the MIC */

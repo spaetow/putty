@@ -215,6 +215,11 @@ extern const_gss_OID GSS_C_NT_EXPORT_NAME;
 #endif /* STATIC_GSSAPI */
 
 extern const gss_OID GSS_MECH_KRB5;
+extern const gss_OID GSS_MECH_EAP_AES_128;
+extern const gss_OID GSS_MECH_EAP_AES_256;
+extern const const_gss_OID gss_mechs_array[];
+extern const char *const gss_mech_names[];
+extern const int gss_mechs_count;
 
 /* GSSAPI functions we use.
  * TODO: Replace with all GSSAPI functions from RFC?

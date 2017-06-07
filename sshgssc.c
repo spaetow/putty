@@ -7,11 +7,11 @@
 #ifndef NO_GSSAPI
 
 static Ssh_gss_stat ssh_gssapi_indicate_mech(struct ssh_gss_library *lib,
-					     Ssh_gss_buf *mech)
+					     Ssh_gss_buf *mech, int mech_index)
 {
     /* Copy constant into mech */
-    mech->length  = GSS_MECH_KRB5->length;
-    mech->value = GSS_MECH_KRB5->elements;
+    mech->length = gss_mechs_array[mech_index]->length;
+    mech->value = gss_mechs_array[mech_index]->elements;
     return SSH_GSS_OK;
 }
 
@@ -38,7 +38,9 @@ static Ssh_gss_stat ssh_gssapi_import_name(struct ssh_gss_library *lib,
 }
 
 static Ssh_gss_stat ssh_gssapi_acquire_cred(struct ssh_gss_library *lib,
-					    Ssh_gss_ctx *ctx)
+					    Ssh_gss_name target,
+					    unsigned int prompt,
+					    Ssh_gss_ctx *ctx, int mech_index)
 {
     gssapi_ssh_gss_ctx *gssctx = snew(gssapi_ssh_gss_ctx);
 
@@ -54,7 +56,8 @@ static Ssh_gss_stat ssh_gssapi_init_sec_context(struct ssh_gss_library *lib,
 						Ssh_gss_name srv_name,
 						int to_deleg,
 						Ssh_gss_buf *recv_tok,
-						Ssh_gss_buf *send_tok)
+						Ssh_gss_buf *send_tok,
+						int mech_index)
 {
     struct gssapi_functions *gss = &lib->u.gssapi;
     gssapi_ssh_gss_ctx *gssctx = (gssapi_ssh_gss_ctx*) *ctx;
@@ -65,7 +68,7 @@ static Ssh_gss_stat ssh_gssapi_init_sec_context(struct ssh_gss_library *lib,
 					     GSS_C_NO_CREDENTIAL,
 					     &gssctx->ctx,
 					     srv_name,
-					     (gss_OID) GSS_MECH_KRB5,
+					     (gss_OID) gss_mechs_array[mech_index],
 					     GSS_C_MUTUAL_FLAG |
 					     GSS_C_INTEG_FLAG | to_deleg,
 					     0,
@@ -83,7 +86,8 @@ static Ssh_gss_stat ssh_gssapi_init_sec_context(struct ssh_gss_library *lib,
 
 static Ssh_gss_stat ssh_gssapi_display_status(struct ssh_gss_library *lib,
 					      Ssh_gss_ctx ctx,
-					      Ssh_gss_buf *buf)
+					      Ssh_gss_buf *buf,
+						  int mech_index)
 {
     struct gssapi_functions *gss = &lib->u.gssapi;
     gssapi_ssh_gss_ctx *gssctx = (gssapi_ssh_gss_ctx *) ctx;
@@ -97,13 +101,13 @@ static Ssh_gss_stat ssh_gssapi_display_status(struct ssh_gss_library *lib,
 
     /* get first mesg from GSS */
     ccc=0;
-    lmax=gss->display_status(&lmin,gssctx->maj_stat,GSS_C_GSS_CODE,(gss_OID) GSS_MECH_KRB5,&ccc,&msg_maj);
+    lmax=gss->display_status(&lmin,gssctx->maj_stat,GSS_C_GSS_CODE,(gss_OID) gss_mechs_array[mech_index],&ccc,&msg_maj);
 
     if (lmax != GSS_S_COMPLETE) return SSH_GSS_FAILURE;
 
     /* get first mesg from Kerberos */
     ccc=0;
-    lmax=gss->display_status(&lmin,gssctx->min_stat,GSS_C_MECH_CODE,(gss_OID) GSS_MECH_KRB5,&ccc,&msg_min);
+    lmax=gss->display_status(&lmin,gssctx->min_stat,GSS_C_MECH_CODE,(gss_OID) gss_mechs_array[mech_index],&ccc,&msg_min);
 
     if (lmax != GSS_S_COMPLETE) {
         gss->release_buffer(&lmin, &msg_maj);
